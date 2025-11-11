@@ -4,7 +4,6 @@ import os
 import inspect
 from pydantic import TypeAdapter
 import requests
-import yfinance as yf
 import json
 
 
@@ -30,21 +29,36 @@ def get_symbol(company: str) -> str:
 
 def get_stock_price(symbol: str):
     """
-    Retrieve the most recent stock price data for a specified company using the Yahoo Finance API via the yfinance Python library.
-    :param symbol: The stock symbol for which to retrieve data, e.g., 'NVDA' for Nvidia.
-    :output: A dictionary containing the most recent stock price data.
+    Retrieve the most recent stock price data using Yahoo Finance REST API.
     """
-    stock = yf.Ticker(symbol)
-    hist = stock.history(period="1d", interval="1m")
-    latest = hist.iloc[-1]
-    return {
-        "timestamp": str(latest.name),
-        "open": latest["Open"],
-        "high": latest["High"],
-        "low": latest["Low"],
-        "close": latest["Close"],
-        "volume": latest["Volume"]
-    }
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {"interval": "1d", "range": "1d"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36"
+        }
+
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        data = response.json()
+
+        if 'chart' in data and 'result' in data['chart'] and len(data['chart']['result']) > 0:
+            result = data['chart']['result'][0]
+            meta = result.get('meta', {})
+
+            current_price = meta.get('regularMarketPrice', 0)
+
+            return {
+                "timestamp": "Current",
+                "open": round(meta.get('regularMarketOpen', current_price), 2),
+                "high": round(meta.get('regularMarketDayHigh', current_price), 2),
+                "low": round(meta.get('regularMarketDayLow', current_price), 2),
+                "close": round(current_price, 2),
+                "volume": meta.get('regularMarketVolume', 0)
+            }
+        else:
+            return {"error": f"Không có dữ liệu cho mã {symbol}"}
+    except Exception as e:
+        return {"error": f"Lỗi: {str(e)}"}
 
 
 tools = [
@@ -91,41 +105,71 @@ def get_completion(messages):
 
 # Bắt đầu làm bài tập từ line này!
 
-question = "Giá cổ phiếu hiện tại của Vinfast là bao nhiêu?"
+print("Xin chào! Tôi có thể giúp bạn tra cứu giá cổ phiếu và crypto.")
+print("Gõ 'bye' hoặc 'q' để kết thúc.\n")
 
 messages = [
-    {"role": "system", "content": "You are a helpful customer support assistant. Use the supplied tools to assist the user."},
-    {"role": "user", "content": question}
+    {
+        "role": "system",
+        "content": """Bạn là một trợ lý tài chính thông minh, thân thiện và hài hước. 
+        Bạn giúp người dùng tra cứu thông tin về cổ phiếu và crypto.
+        Hãy trả lời một cách vui vẻ, dễ hiểu, có thể thêm emoji cho sinh động.
+        Khi đưa thông tin giá cổ phiếu, hãy format số cho dễ đọc và giải thích ngắn gọn."""
+    }
 ]
 
-response = get_completion(messages)
-first_choice = response.choices[0]
-finish_reason = first_choice.finish_reason
+while True:
+    try:
+        question = input("Bạn: ").strip()
 
-# Loop cho tới khi model báo stop và đưa ra kết quả
-while finish_reason != "stop":
-    tool_call = first_choice.message.tool_calls[0]
+        if question.lower() in ['bye', 'q']:
+            print("Bot: Tạm biệt!\n")
+            break
 
-    tool_call_function = tool_call.function
-    tool_call_arguments = json.loads(tool_call_function.arguments)
+        if not question:
+            continue
 
-    tool_function = FUNCTION_MAP[tool_call_function.name]
-    result = tool_function(**tool_call_arguments)
+        messages.append({"role": "user", "content": question})
 
-    messages.append(first_choice.message)
-    messages.append({
-        "role": "tool",
-        "tool_call_id": tool_call.id,
-        "name": tool_call_function.name,
-        "content": json.dumps({"result": result})
-    })
+        response = get_completion(messages)
+        first_choice = response.choices[0]
+        finish_reason = first_choice.finish_reason
 
-    print(messages)
+        while finish_reason == "tool_calls":
+            if not first_choice.message.tool_calls:
+                break
 
-    # Chờ kết quả từ LLM
-    response = get_completion(messages)
-    first_choice = response.choices[0]
-    finish_reason = first_choice.finish_reason
+            messages.append(first_choice.message)
 
-# In ra kết quả sau khi đã thoát khỏi vòng lặp
-print(first_choice.message.content)
+            for tool_call in first_choice.message.tool_calls:
+                tool_call_function = tool_call.function
+                tool_call_arguments = json.loads(tool_call_function.arguments)
+
+                tool_function = FUNCTION_MAP[tool_call_function.name]
+                result = tool_function(**tool_call_arguments)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call_function.name,
+                    "content": json.dumps(result, ensure_ascii=False)
+                })
+
+            response = get_completion(messages)
+            first_choice = response.choices[0]
+            finish_reason = first_choice.finish_reason
+
+        bot_response = first_choice.message.content
+
+        if bot_response:
+            messages.append({"role": "assistant", "content": bot_response})
+
+            print(f"Bot: {bot_response}\n")
+
+    except KeyboardInterrupt:
+        print("\n\nBot: Tạm biệt!\n")
+        break
+    except Exception as e:
+        print(f"Lỗi: {str(e)}\n")
+        if messages and messages[-1]["role"] == "user":
+            messages.pop()
